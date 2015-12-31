@@ -21,11 +21,9 @@
    (asynchronous-p
     :initarg :asynchronous-p
     :initform nil)
-   (special-commands
-    :initarg :special-commands
-    :initform '("eval"))
    (fallback-command
-    :initarg :fallback-command)
+    :initarg :fallback-command
+    :initform nil)
    (interval
     :initarg :interval
     :initform 0.7)
@@ -46,7 +44,7 @@
   (setf (gethash command (slot-value bot 'commands)) func))
 
 (defmethod get-command ((bot bot) (command string))
-  (gethash command (slot-value bot 'commands)))
+  (or (gethash command (slot-value bot 'commands)) (slot-value bot 'fallback-command)))
 
 (defmethod del-command ((bot bot) (command string))
   (remhash command (slot-value bot 'commands)))
@@ -71,38 +69,27 @@
                  0
                  (nth-value 1 (scan (slot-value bot 'attention-prefix) text)))))
           (when start-pos
-            (let* ((space-index (position #\Space text :start start-pos))
-                   (command (subseq text start-pos space-index))
-                   (command-func-or-symbol (or
-                       (get-command bot command)
-                       (and
-                         (slot-boundp bot 'fallback-command)
-                         (slot-value bot 'fallback-command)))))
-                (when command-func-or-symbol
-                  (let ((command-func (if (symbolp command-func-or-symbol)
-                          (symbol-function command-func-or-symbol)
-                          command-func-or-symbol))
-                        (args (if space-index
-                          (progn
-                            (loop
-                              with text-length = (length text)
-                              while (and
-                                (< space-index text-length) (eql (char text space-index) #\Space))
-                              do (incf space-index))
-                            (subseq text space-index))
-                          ""))
-                        (nick (source message)))
-                    `(,(member command (slot-value bot 'special-commands) :test #'string=)
-                      ,priv-p ,(if priv-p nick target) ,nick ,command-func ,args))))))))
-    '(nil nil nil nil nil))))
+            (multiple-value-bind
+                (command-list space-index)
+                (split-sequence #\Space text :start start-pos :remove-empty-subseqs t :count 1)
+              (let* ((command (car command-list))
+                     (command-func-or-symbol (get-command bot command)))
+                  (when command-func-or-symbol
+                    (let ((command-func (if (symbolp command-func-or-symbol)
+                            (symbol-function command-func-or-symbol)
+                            command-func-or-symbol))
+                          (nick (source message))
+                          (args (subseq text space-index)))
+                      `(,priv-p ,(if priv-p nick target) ,nick ,command-func ,args)))))))))
+    '(nil nil nil nil))))
 
 (defun message-hook (message)
   (let ((bot (connection message)))
-    (multiple-value-bind (special-p priv-p channel nick command-func args) (parse-message message)
+    (multiple-value-bind (priv-p channel nick command-func args) (parse-message message)
       (when command-func
         ; (format (client-stream bot) "~s~%" (list priv-p channel nick command-func args))
         (client-log bot message "HANDLING-EVENT:")
-        (if (and (slot-value bot 'asynchronous-p) (not special-p))
+        (if (slot-value bot 'asynchronous-p)
           (funcall *thread-func*
             #'(lambda () (send-message bot message priv-p channel nick command-func args)))
           (send-message bot message priv-p channel nick command-func args))
